@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use nix::fcntl::{self, OFlag};
 use nix::sys::sendfile;
 use nix::sys::stat::{self, mode_t, Mode};
+use nix::unistd;
 
 use gothook::GotHook;
 
@@ -13,7 +14,7 @@ lazy_static::lazy_static! {
 }
 
 #[no_mangle]
-extern "C" fn open_callback(fd: c_int, path: *const c_char, mode: mode_t) {}
+extern "C" fn open_callback(_fd: c_int, _path: *const c_char, _mode: mode_t) {}
 
 #[ctor::ctor]
 fn init() {
@@ -44,6 +45,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Copy the input file to the output file.
     sendfile::sendfile(output_fd, input_fd, None, input_stat.st_size as usize)?;
+
+    // Close the files.
+    unistd::close(output_fd)?;
+    unistd::close(input_fd)?;
 
     Ok(())
 }

@@ -3,7 +3,10 @@ use std::ptr;
 use std::slice;
 
 use libc::Dl_info;
-use object::File;
+use object::elf::{self, Dyn64, FileHeader64, ProgramHeader64};
+use object::endian::Endianness;
+use object::read::elf::{FileHeader, ProgramHeader};
+use object::ReadRef;
 use procfs::process::Process;
 
 use crate::error;
@@ -12,10 +15,26 @@ pub struct GotHook;
 
 impl GotHook {
     pub fn new(function_name: &str, callback: *const c_void) -> error::Result<Self> {
-        // Parse the callback ELF file.
+        // Retrieve the callback symbolic information.
         let callback_information = Self::get_address_symbolic_information(callback)?;
-        let callback_elf_data = Self::find_elf_in_memory(callback_information.dli_fbase as u64)?;
-        let callback_elf = File::parse(callback_elf_data).map_err(error::Error::ParseObjectFile)?;
+
+        // Find the callback ELF in memory.
+        let elf_data = Self::find_elf_in_memory(callback_information.dli_fbase as u64)?;
+
+        // Parse the ELF's header.
+        let elf_header: &FileHeader64<Endianness> =
+            FileHeader64::parse(elf_data).map_err(error::Error::ParseElfHeader)?;
+
+        // Get the ELF's endianness.
+        let elf_endian = elf_header
+            .endian()
+            .map_err(error::Error::GetElfEndianness)?;
+
+        // Locate the ELF's dynamic segment.
+        let elf_dynamic_segment = Self::find_elf_dynamic_segment(elf_data, elf_header, elf_endian)?;
+
+        // Locate the ELF's GOT.
+        let got = Self::find_elf_got(elf_dynamic_segment);
 
         Ok(Self)
     }
@@ -72,5 +91,42 @@ impl GotHook {
                 (top_address - base_address) as usize,
             )
         })
+    }
+
+    fn find_elf_dynamic_segment<'a>(
+        data: &'a [u8],
+        header: &'a FileHeader64<Endianness>,
+        endian: Endianness,
+    ) -> error::Result<&'a [Dyn64<Endianness>]> {
+        Self::get_elf_segments(data, header, endian)?
+            .iter()
+            .find(|&s| elf::PT_DYNAMIC == s.p_type(endian))
+            .ok_or(error::Error::ElfHasNoDynamicSegment)?
+            .dynamic(endian, data)
+            .map_err(error::Error::ReadElfDynamicSegment)?
+            .ok_or(error::Error::ElfHasNoDynamicSegment)
+    }
+
+    fn get_elf_segments<'a>(
+        data: &'a [u8],
+        header: &'a FileHeader64<Endianness>,
+        endian: Endianness,
+    ) -> error::Result<&'a [ProgramHeader64<Endianness>]> {
+        // Get the ELF's program headers offset.
+        let program_headers_offset: u64 = header.e_phoff(endian).into();
+        if 0 == program_headers_offset {
+            return Err(error::Error::ElfHasNoProgramHeaders);
+        }
+
+        // Get the number of program headers in the ELF.
+        let program_headers_number = header
+            .phnum(endian, data)
+            .map_err(error::Error::GetElfProgramHeadersNumber)?;
+        if 0 == program_headers_number {
+            return Err(error::Error::ElfHasNoProgramHeaders);
+        }
+
+        data.read_slice_at(program_headers_offset, program_headers_number)
+            .map_err(|_| error::Error::ReadElfProgramHeaders)
     }
 }
