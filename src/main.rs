@@ -1,5 +1,6 @@
 use std::error::Error;
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, CString};
+use std::mem;
 use std::sync::Mutex;
 
 use nix::fcntl::{self, OFlag};
@@ -14,24 +15,47 @@ lazy_static::lazy_static! {
 }
 
 #[no_mangle]
-extern "C" fn open_callback(_fd: c_int, _path: *const c_char, _mode: mode_t) {}
+extern "C" fn open_callback(pathname: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    let got_hook = OPEN_HOOK.lock().unwrap();
+    if let Some(hook) = &(*got_hook) {
+        let original_open = unsafe {
+            mem::transmute::<*const (), unsafe extern "C" fn(*const c_char, c_int, mode_t) -> c_int>(
+                hook.get_original_function(),
+            )
+        };
+
+        // Check if the file is being opened as read only.
+        if OFlag::O_RDONLY.bits() == flags {
+            // File is being opened as read only!
+            // Replace it with the pwn file!!!
+            let pwned_pathname = CString::new("pwn.txt").unwrap();
+            unsafe { original_open(pwned_pathname.as_ptr(), flags, mode) }
+        } else {
+            unsafe { original_open(pathname, flags, mode) }
+        }
+
+        // File isn't opened as read only, invoke the original `open`.
+    } else {
+        -1
+    }
+}
 
 #[ctor::ctor]
 fn init() {
     let mut open_hook = OPEN_HOOK.lock().unwrap();
-    let open_callback_ptr = open_callback as *const c_void;
+    let open_callback_ptr = open_callback as *const ();
     println!("In constructor: hooking open with callback [{open_callback_ptr:p}]");
     *open_hook = Some(GotHook::new("open", open_callback_ptr).unwrap());
 }
 
 #[ctor::dtor]
 fn fini() {
-    println!("In destructor!");
+    println!("In destructor: restoring hooked open");
+    let mut open_hook = OPEN_HOOK.lock().unwrap();
+    *open_hook = None;
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("In main: copying input file to output file");
-
     // Output the input and output files.
     let input_fd = fcntl::open("input.txt", OFlag::O_RDONLY, Mode::empty())?;
     let output_fd = fcntl::open(
