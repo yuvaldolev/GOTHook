@@ -12,14 +12,15 @@ lazy_static::lazy_static! {
     static ref OPEN_HOOK: Mutex<Option<GotHook>> = Mutex::new(None);
 }
 
-fn open_callback(fd: c_int, path: *const c_char, mode: mode_t) {}
+#[no_mangle]
+extern "C" fn open_callback(fd: c_int, path: *const c_char, mode: mode_t) {}
 
 #[ctor::ctor]
 fn init() {
     let mut open_hook = OPEN_HOOK.lock().unwrap();
     let open_callback_ptr = open_callback as *const c_void;
-    *open_hook = Some(GotHook::new("open", open_callback_ptr));
     println!("In constructor: hooking open with callback [{open_callback_ptr:p}]");
+    *open_hook = Some(GotHook::new("open", open_callback_ptr).unwrap());
 }
 
 #[ctor::dtor]
