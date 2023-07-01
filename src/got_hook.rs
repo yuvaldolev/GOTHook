@@ -1,11 +1,12 @@
 use std::ffi::c_void;
+use std::mem;
 use std::ptr;
 use std::slice;
 
 use libc::Dl_info;
 use object::elf::{self, Dyn64, FileHeader64, ProgramHeader64};
 use object::endian::Endianness;
-use object::read::elf::{FileHeader, ProgramHeader};
+use object::read::elf::{Dyn, FileHeader, ProgramHeader};
 use object::ReadRef;
 use procfs::process::Process;
 
@@ -33,8 +34,9 @@ impl GotHook {
         // Locate the ELF's dynamic segment.
         let elf_dynamic_segment = Self::find_elf_dynamic_segment(elf_data, elf_header, elf_endian)?;
 
-        // Locate the ELF's GOT.
-        let got = Self::find_elf_got(elf_dynamic_segment);
+        // Locate the ELF's PLT relocation table.
+        let plt_relocation_table =
+            Self::find_plt_relocation_table(elf_data, elf_dynamic_segment, elf_endian)?;
 
         Ok(Self)
     }
@@ -98,13 +100,64 @@ impl GotHook {
         header: &'a FileHeader64<Endianness>,
         endian: Endianness,
     ) -> error::Result<&'a [Dyn64<Endianness>]> {
-        Self::get_elf_segments(data, header, endian)?
+        // Find the dynamic segment program header.
+        let program_header = Self::get_elf_segments(data, header, endian)?
             .iter()
             .find(|&s| elf::PT_DYNAMIC == s.p_type(endian))
-            .ok_or(error::Error::ElfHasNoDynamicSegment)?
-            .dynamic(endian, data)
-            .map_err(error::Error::ReadElfDynamicSegment)?
-            .ok_or(error::Error::ElfHasNoDynamicSegment)
+            .ok_or(error::Error::ElfHasNoDynamicSegment)?;
+
+        // Read the dynamic segment.
+        data.read_slice_at(
+            program_header.p_vaddr(endian),
+            program_header.p_memsz(endian) as usize / mem::size_of::<Dyn64<Endianness>>(),
+        )
+        .map_err(|_| error::Error::ReadElfDynamicSegment)
+    }
+
+    fn find_plt_relocation_table(
+        data: &[u8],
+        dynamic_segment: &[Dyn64<Endianness>],
+        endian: Endianness,
+    ) -> error::Result<()> {
+        // Find the plt relocation table address.
+        let jmprel_entry = dynamic_segment
+            .iter()
+            .find(|&e| {
+                e.tag32(endian)
+                    .map(|t| elf::DT_JMPREL == t)
+                    .unwrap_or(false)
+            })
+            .ok_or(error::Error::ElfHasNoPltRelocationTable)?;
+        let address = jmprel_entry.d_val(endian);
+
+        // Determine the kind of the relocations in the PLT relocation table.
+        let relocation_kind_entry = dynamic_segment
+            .iter()
+            .find(|&e| {
+                e.tag32(endian)
+                    .map(|t| elf::DT_PLTREL == t)
+                    .unwrap_or(false)
+            })
+            .ok_or(error::Error::ElfHasNoPltRelocationTable)?;
+        let relocation_kind =
+            relocation_kind_entry
+                .val32(endian)
+                .ok_or(error::Error::InvalidElfRelocationKind(
+                    relocation_kind_entry.d_val(endian),
+                ))?;
+
+        // Get the PLT relocation table size.
+        let relocation_table_size_entry = dynamic_segment
+            .iter()
+            .find(|&e| {
+                e.tag32(endian)
+                    .map(|t| elf::DT_PLTRELSZ == t)
+                    .unwrap_or(false)
+            })
+            .ok_or(error::Error::ElfHasNoPltRelocationTable)?;
+        let relocation_table_size = relocation_table_size_entry.d_val(endian);
+
+        Ok(())
     }
 
     fn get_elf_segments<'a>(

@@ -14,16 +14,16 @@ pub enum Error {
     #[error("failed reading process maps: {0}")]
     ReadProcessMaps(#[source] ProcError),
 
-    #[error("failed parsing ELF header")]
+    #[error("failed parsing ELF header: {0}")]
     ParseElfHeader(#[source] object::Error),
 
-    #[error("failed getting ELF endianness")]
+    #[error("failed getting ELF endianness: {0}")]
     GetElfEndianness(#[source] object::Error),
 
     #[error("ELF has no program headers")]
     ElfHasNoProgramHeaders,
 
-    #[error("failed getting number of ELF program headers")]
+    #[error("failed getting number of ELF program headers: {0}")]
     GetElfProgramHeadersNumber(#[source] object::Error),
 
     #[error("failed reading ELF program headers")]
@@ -33,7 +33,13 @@ pub enum Error {
     ElfHasNoDynamicSegment,
 
     #[error("failed reading ELF dynamic segment")]
-    ReadElfDynamicSegment(#[source] object::Error),
+    ReadElfDynamicSegment,
+
+    #[error("ELF has no PLT relocation table")]
+    ElfHasNoPltRelocationTable,
+
+    #[error("invalid ELF relocation kind ({0})"]
+    InvalidElfRelocationKind(u64),
 }
 
 pub type Result<T> = result::Result<T, Error>;
